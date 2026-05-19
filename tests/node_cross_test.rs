@@ -1,5 +1,5 @@
-use super::*;
-use serde_json::Value;
+use js_like_eq::JsCompare;
+use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
@@ -120,7 +120,7 @@ fn cross_check_test_lessthan() {
     let tocompare = get_to_compare();
     for lhs in tocompare.iter() {
         for rhs in tocompare.iter() {
-            let rust_result = lhs.less_than(rhs);
+            let rust_result = lhs.js_lt(rhs);
             let js_result = evaluate_js_expression_simple(&format!(
                 "{}<{}",
                 format_for_js_expr(lhs),
@@ -142,7 +142,7 @@ fn cross_check_test_less_than_equal_to() {
     let tocompare = get_to_compare();
     for lhs in tocompare.iter() {
         for rhs in tocompare.iter() {
-            let rust_result = lhs.less_than_equal_to(rhs);
+            let rust_result = lhs.js_le(rhs);
             let js_result = evaluate_js_expression_simple(&format!(
                 "{}<={}",
                 format_for_js_expr(lhs),

@@ -1,76 +1,135 @@
+//! JavaScript-style comparison and truthiness for [`serde_json::Value`].
+//!
+//! This crate ports the coercion rules of JavaScript's `==`, `===`, `<`, `<=`,
+//! `>`, `>=` and the language's truthiness rules onto `serde_json::Value` so
+//! values built with [`serde_json::json!`] compare the way the equivalent JS
+//! literals would.
+//!
+//! # Quick start
+//!
+//! ```
+//! use js_like_eq::{JsCompare, JsonTruthy};
+//! use serde_json::json;
+//!
+//! assert!(json!(1).js_eq(&json!("1")));
+//! assert!(json!(null).js_eq(&json!(null)));
+//! assert!(!json!(null).js_eq(&json!(0)));
+//! assert!(json!([1]).js_eq(&json!(1)));
+//! assert!(json!("b").js_gt(&json!("a")));
+//! assert!(json!("hello").is_truthy());
+//! ```
+//!
+//! For ergonomic operator-based comparison, wrap values in [`JsValue`]:
+//!
+//! ```
+//! use js_like_eq::JsValue;
+//! use serde_json::json;
+//!
+//! assert_eq!(JsValue::from(json!(1)), JsValue::from(json!("1")));
+//! ```
+//!
+//! # Semantics
+//!
+//! `js_eq` mirrors `==`: numbers parse out of strings, single-element arrays
+//! unwrap, empty arrays equal `false` and `""`, and arrays/objects never equal
+//! anything structurally (matching JS reference semantics).
+//!
+//! `js_lt` / `js_le` mirror `<` / `<=`: `null` coerces to `0`, booleans coerce
+//! to `0`/`1`, objects stringify to `"[object Object]"`, and arrays either
+//! unwrap, become `false`, or join with commas depending on the partner type.
+//!
+//! `js_strict_eq` mirrors `===`: same type required, primitives compared by
+//! value; arrays and objects never strictly equal each other since the JS rule
+//! is reference identity and owned `Value`s have no identity to share.
+
 use serde_json::{Value, json};
 
-pub trait JavaScriptEquality {
-    fn equals(&self, other: &Self) -> bool;
-    fn less_than(&self, other: &Self) -> bool;
-    fn less_than_equal_to(&self, other: &Self) -> bool;
-    fn greater(&self, other: &Self) -> bool;
-    fn is_strict_equal(&self, other: &Self) -> bool;
-    fn is_not_equal(&self, other: &Self) -> bool;
-    fn is_not_strict_equal(&self, other: &Self) -> bool;
-    fn coerce_and_compare(
-        &self,
-        rhs: &Self,
-        bool_compare: impl Fn(&bool, &bool) -> bool,
-        string_compare: impl Fn(&str, &str) -> bool,
-        num_compare: impl Fn(&f64, &f64) -> bool,
-    ) -> bool;
+/// JavaScript-style comparison operators for [`serde_json::Value`].
+///
+/// See the [crate-level docs](crate) for the coercion rules. Default impls are
+/// provided for `js_ne`, `js_strict_ne`, `js_gt`, and `js_ge` in terms of the
+/// other methods.
+pub trait JsCompare {
+    /// JS `==` (loose equality with coercion).
+    fn js_eq(&self, other: &Self) -> bool;
+
+    /// JS `===` (strict equality: same type and value).
+    fn js_strict_eq(&self, other: &Self) -> bool;
+
+    /// JS `<`.
+    fn js_lt(&self, other: &Self) -> bool;
+
+    /// JS `<=`.
+    fn js_le(&self, other: &Self) -> bool;
+
+    /// JS `>`. Defaults to `other.js_lt(self)`.
+    fn js_gt(&self, other: &Self) -> bool {
+        other.js_lt(self)
+    }
+
+    /// JS `>=`. Defaults to `other.js_le(self)`.
+    fn js_ge(&self, other: &Self) -> bool {
+        other.js_le(self)
+    }
+
+    /// JS `!=`. Defaults to `!self.js_eq(other)`.
+    fn js_ne(&self, other: &Self) -> bool {
+        !self.js_eq(other)
+    }
+
+    /// JS `!==`. Defaults to `!self.js_strict_eq(other)`.
+    fn js_strict_ne(&self, other: &Self) -> bool {
+        !self.js_strict_eq(other)
+    }
 }
 
-pub fn good_enough_equal(a: f64, b: f64) -> bool {
-    (a - b).abs() < std::f64::EPSILON
-}
-
+/// JavaScript-style truthiness for [`serde_json::Value`].
 pub trait JsonTruthy {
-    fn is_truthy(&self, include_zero: bool) -> bool;
+    /// Returns `true` if the value would be considered truthy in JS.
+    ///
+    /// - `null` → `false`
+    /// - `bool` → its own value
+    /// - number → `true` if non-zero and non-NaN
+    /// - string → `true` if non-empty
+    /// - array / object → always `true` (even when empty), matching JS
+    fn is_truthy(&self) -> bool;
 }
 
 impl JsonTruthy for Value {
-    fn is_truthy(&self, _include_zero: bool) -> bool {
-        match *self {
-            Value::Bool(ref i) => *i,
-            Value::Number(ref n) => n.as_f64().is_some_and(|f| f == 1.0),
-
+    fn is_truthy(&self) -> bool {
+        match self {
             Value::Null => false,
-            Value::String(ref i) => !i.is_empty(),
-            Value::Array(ref i) => !i.is_empty(),
-            Value::Object(ref i) => !i.is_empty(),
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64().map(|f| f != 0.0 && !f.is_nan()).unwrap_or(false),
+            Value::String(s) => !s.is_empty(),
+            Value::Array(_) | Value::Object(_) => true,
         }
     }
 }
 
-impl JavaScriptEquality for Value {
-    fn equals(&self, other: &Self) -> bool {
+impl JsCompare for Value {
+    fn js_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Value::Null, Value::Null) => true,
-            // In JavaScript, when we compare null, arrays, or objects to
-            // anything else, including their own type with identical values (not null), it
-            // returns false.
+            // In JS, comparing null to anything other than null/undefined is false.
+            // Arrays and objects never structurally equal each other (reference semantics).
             (Value::Null, _) | (_, Value::Null) => false,
             (Value::Array(_), Value::Array(_)) => false,
             (_, Value::Object(_)) | (Value::Object(_), _) => false,
-            // These types can be safely compared with their own type without any hidden caveats.
             (Value::Bool(_), Value::Bool(_)) | (Value::String(_), Value::String(_)) => {
                 self == other
             }
-
-            // If the values are numbers, compare them as numbers. with precision tolerance.
-            (Value::Number(a), Value::Number(b)) => {
-                if let (Some(a), Some(b)) = (a.as_f64(), b.as_f64()) {
-                    return good_enough_equal(a, b);
-                }
-                false
-            }
-            // If one value is a number and the other is a string, attempt to parse the string as a number.
+            (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
+                (Some(a), Some(b)) => approx_eq(a, b),
+                _ => false,
+            },
             (Value::Number(n), Value::String(s)) | (Value::String(s), Value::Number(n)) => {
-                if let Ok(parsed) = s.parse::<f64>() {
-                    if let Some(num) = n.as_f64() {
-                        return good_enough_equal(parsed, num);
-                    }
+                if let (Ok(parsed), Some(num)) = (s.parse::<f64>(), n.as_f64()) {
+                    approx_eq(parsed, num)
+                } else {
+                    false
                 }
-                false
             }
-            // If one value is a boolean and the other is a number, compare the boolean as a number.
             (Value::Bool(b), Value::Number(n)) | (Value::Number(n), Value::Bool(b)) => {
                 match (n.as_f64(), b) {
                     (Some(num), true) => num == 1.0,
@@ -78,9 +137,7 @@ impl JavaScriptEquality for Value {
                     _ => false,
                 }
             }
-            // If one value is a boolean and the other is a string, attempt to parse the string as a number.
             (Value::Bool(b), Value::String(s)) | (Value::String(s), Value::Bool(b)) => {
-                // empty strings has an intrinsic value of false
                 if s.is_empty() {
                     return !b;
                 }
@@ -90,18 +147,17 @@ impl JavaScriptEquality for Value {
                     _ => false,
                 }
             }
-            // in JS comma separated strings are treated as arrays
+            // In JS, comma-separated strings compare elementwise against arrays.
             (Value::String(s), Value::Array(values)) | (Value::Array(values), Value::String(s)) => {
-                // empty strings and empty arrays are equal
                 if s.is_empty() && values.is_empty() {
                     return true;
                 }
-                let mut s_elements = s.split(",");
+                let mut s_elements = s.split(',');
                 let mut array_elements = values.iter();
                 loop {
                     match (array_elements.next(), s_elements.next()) {
                         (Some(array_value), Some(string_element)) => {
-                            if !array_value.equals(&Value::String(string_element.to_string())) {
+                            if !array_value.js_eq(&Value::String(string_element.to_string())) {
                                 return false;
                             }
                         }
@@ -110,15 +166,12 @@ impl JavaScriptEquality for Value {
                     }
                 }
             }
-            // In JavaScript, appart from empty arrays all arrays are considered
-            // nor false nor true, when compared with another value it is
-            // considered as false, unless they have a single element. In that
-            // case, the array is treated as that element and compared.
+            // Single-element arrays unwrap; empty arrays equal `false`.
             (other, Value::Array(values)) | (Value::Array(values), other) => {
                 if values.len() == 1 {
-                    return other.equals(&values[0]);
-                } else if let Value::Bool(b) = other {
-                    // empty arrays have an intrinsic value of false
+                    return other.js_eq(&values[0]);
+                }
+                if let Value::Bool(b) = other {
                     if values.is_empty() {
                         return !b;
                     }
@@ -128,185 +181,111 @@ impl JavaScriptEquality for Value {
         }
     }
 
-    /// the assumption is values will be compared most primitive to higher order datatypes
-    /// if mixed data type boolen wiil get converted to number always
-    fn less_than(self: &Value, rhs: &Self) -> bool {
-        self.coerce_and_compare(
-            rhs,
-            |lhs, rhs| lhs < rhs,
-            |lhs, rhs| lhs < rhs,
-            |lhs, rhs| lhs < rhs,
-        )
-    }
-    fn less_than_equal_to(&self, rhs: &Self) -> bool {
-        self.coerce_and_compare(
-            rhs,
-            |lhs, rhs| lhs <= rhs,
-            |lhs, rhs| lhs <= rhs,
-            |lhs, rhs| lhs <= rhs,
-        )
-    }
-
-    fn greater(&self, other: &Self) -> bool {
-        other.less_than(self)
-    }
-
-    fn is_strict_equal(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_not_strict_equal(&self, _other: &Self) -> bool {
-        todo!()
-    }
-
-    fn is_not_equal(&self, other: &Self) -> bool {
-        !Self::equals(self, other)
-    }
-
-    /// Coerces and compares two JSON `Value` objects based on JavaScript-like type coercion rules.
-    ///
-    /// # Coercion Rules assumptions
-    /// ## we are trying to mimic the JS coercion rules in this function. we are making lot of assumptions about how the coercion works.
-    /// 1.  All values get coerced into either `number`, or `string` for comparison.
-    /// 1.  number and  string could be compared with their own type.
-    /// 1.  `null` get coerced into `0` before comparison.
-    /// 1.  `bool` values are coerced into `number` values before comparison.
-    /// 1.  'array
-    /// 1.  if we encounter a number and a string, we will try to parse the string
-    ///     as a number. if it fails,that means we comparing `Nan` with a `number`.
-    ///     we will return false.
-    /// 1.  one exception to the above rule is when a string is empty, in that case
-    ///     we parse the string to number `0` and compare.
-    /// 1.  empty arrays are also considered as `0` for comparison. unless the other
-    ///     value is a string or an array in that case it's treated as a normal
-    ///     array with multiple elements.
-    /// 1.  if the array has a single element, we will treat the array as that
-    ///     single element and compare but just like the empty array if the other
-    ///     value is a string or an array we would treat it as a normal array with
-    ///     multiple elements.
-    /// 1.  normal arrays with multiple elements are treated as strings for comparison. for that JS calls `.toString()` on arrays it would essentially convert array into a string of comma seperated values.
-    fn coerce_and_compare(
-        &self,
-        rhs: &Self,
-        bool_compare: impl Fn(&bool, &bool) -> bool,
-        string_compare: impl Fn(&str, &str) -> bool,
-        num_compare: impl Fn(&f64, &f64) -> bool,
-    ) -> bool {
-        let lhs = self;
-        match (lhs, rhs) {
-            // when comparing with relational operators, null is coerced to 0
-            (Value::Null, _) => {
-                json!(0).coerce_and_compare(rhs, bool_compare, string_compare, num_compare)
-            }
-            (_, Value::Null) => {
-                lhs.coerce_and_compare(&json!(0), bool_compare, string_compare, num_compare)
-            }
-            // These types can be safely compared with their own type without any hidden caveats.
-            (Value::Bool(lhs_bool), Value::Bool(rhs_bool)) => bool_compare(lhs_bool, rhs_bool),
-            // we are doing a lexicographical comparison
-            (Value::String(lhs_string), Value::String(rhs_string)) => {
-                string_compare(lhs_string, rhs_string)
-            }
-            (Value::Number(lhs_num), Value::Number(rhs_num)) => {
-                if let (Some(lhs_num), Some(rhs_num)) = (lhs_num.as_f64(), rhs_num.as_f64()) {
-                    return num_compare(&lhs_num, &rhs_num);
-                }
-                false
-            }
-            (Value::Number(_), Value::String(string))
-            | (Value::String(string), Value::Number(_)) => {
-                let s_parsed: Value = if string.is_empty() {
-                    json!(0)
-                } else {
-                    match string.parse::<f64>() {
-                        Ok(parsed) => json!(parsed),
-                        // nan compared with anything is false
-                        _ => return false,
-                    }
-                };
-                if matches!((lhs, rhs), (Value::Number(_), Value::String(_))) {
-                    lhs.coerce_and_compare(&s_parsed, bool_compare, string_compare, num_compare)
-                } else {
-                    s_parsed.coerce_and_compare(rhs, bool_compare, string_compare, num_compare)
-                }
-            }
-            // If one value is a boolean and the other is a number, compare the boolean as a number.
-            (_, Value::Bool(rhs_bool)) => match rhs_bool {
-                true => {
-                    lhs.coerce_and_compare(&json!(1), bool_compare, string_compare, num_compare)
-                }
-                false => {
-                    lhs.coerce_and_compare(&json!(0), bool_compare, string_compare, num_compare)
-                }
+    fn js_strict_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
+                (Some(x), Some(y)) => approx_eq(x, y),
+                _ => a == b,
             },
-            // If one value is a boolean and the other is a number, compare the boolean as a number.
-            (Value::Bool(lhs_bool), _) => match lhs_bool {
-                true => json!(1).coerce_and_compare(rhs, bool_compare, string_compare, num_compare),
-                false => {
-                    json!(0).coerce_and_compare(rhs, bool_compare, string_compare, num_compare)
-                }
-            },
-            (Value::Object(_), _) | (_, Value::Object(_)) => {
-                if matches!(lhs, Value::Object(_)) {
-                    return json!("[object Object]").coerce_and_compare(
-                        rhs,
-                        bool_compare,
-                        string_compare,
-                        num_compare,
-                    );
-                } else {
-                    return lhs.coerce_and_compare(
-                        &json!("[object Object]"),
-                        bool_compare,
-                        string_compare,
-                        num_compare,
-                    );
-                }
-            }
-            (Value::Array(values), other) | (other, Value::Array(values)) => {
-                let array_coerced = {
-                    if values.len() == 1 && !matches!(other, Value::String(_) | Value::Array(_)) {
-                        values[0].clone()
-                    } else if values.is_empty()
-                        && !matches!(other, Value::String(_) | Value::Array(_))
-                    {
-                        json!(false)
-                    } else {
-                        match other {
-                            Value::Bool(_)
-                            | Value::Number(_)
-                            | Value::String(_)
-                            | Value::Array(_) => {
-                                json!(array_to_string(values))
-                            }
-                            Value::Object(_) | Value::Null => unreachable!(),
-                        }
-                    }
-                };
-                if matches!(lhs, Value::Array(_)) {
-                    return array_coerced.coerce_and_compare(
-                        other,
-                        bool_compare,
-                        string_compare,
-                        num_compare,
-                    );
-                } else {
-                    return other.coerce_and_compare(
-                        &array_coerced,
-                        bool_compare,
-                        string_compare,
-                        num_compare,
-                    );
-                }
-            }
+            (Value::String(a), Value::String(b)) => a == b,
+            // JS `===` for composites is reference identity; owned `Value`s have
+            // no shared identity, so we mirror "two literals are not `===`".
+            (Value::Array(_), Value::Array(_)) | (Value::Object(_), Value::Object(_)) => false,
+            _ => false,
         }
+    }
+
+    fn js_lt(&self, rhs: &Self) -> bool {
+        coerce_and_compare(self, rhs, |a, b| a < b, |a, b| a < b, |a, b| a < b)
+    }
+
+    fn js_le(&self, rhs: &Self) -> bool {
+        coerce_and_compare(self, rhs, |a, b| a <= b, |a, b| a <= b, |a, b| a <= b)
     }
 }
 
-pub fn array_to_string(vec: &Vec<Value>) -> String {
+/// An owned wrapper around [`serde_json::Value`] that compares with JS semantics.
+///
+/// Implements [`PartialEq`] via [`JsCompare::js_eq`] so values can be compared
+/// with `==` and `!=` directly. Ordering is intentionally **not** implemented
+/// via [`PartialOrd`] because JS `<`/`<=`/`==` do not form a consistent
+/// `PartialOrd` (e.g. two empty objects are `<=` each other in both directions
+/// yet `==` is false). Use [`JsCompare::js_lt`] etc. for ordering.
+///
+/// # Example
+///
+/// ```
+/// use js_like_eq::JsValue;
+/// use serde_json::json;
+///
+/// let a = JsValue::from(json!([1]));
+/// let b = JsValue::from(json!(1));
+/// assert_eq!(a, b);
+/// ```
+#[derive(Debug, Clone)]
+pub struct JsValue(pub Value);
+
+impl JsValue {
+    /// Returns a reference to the inner [`Value`].
+    pub fn inner(&self) -> &Value {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the inner [`Value`].
+    pub fn into_inner(self) -> Value {
+        self.0
+    }
+}
+
+impl From<Value> for JsValue {
+    fn from(v: Value) -> Self {
+        JsValue(v)
+    }
+}
+
+impl From<JsValue> for Value {
+    fn from(v: JsValue) -> Self {
+        v.0
+    }
+}
+
+impl AsRef<Value> for JsValue {
+    fn as_ref(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for JsValue {
+    type Target = Value;
+
+    fn deref(&self) -> &Value {
+        &self.0
+    }
+}
+
+impl PartialEq for JsValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.js_eq(&other.0)
+    }
+}
+
+/// Approximate equality for `f64`, used to absorb tiny rounding error.
+///
+/// Uses [`f64::EPSILON`] as an absolute tolerance, which is correct only for
+/// numbers near `1.0`. Callers comparing values of very different magnitude
+/// should use [`PartialEq`] directly.
+pub(crate) fn approx_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() < f64::EPSILON
+}
+
+/// JS `Array.prototype.toString`: comma-join, flattening nested arrays and
+/// rendering objects as `"[object Object]"`.
+pub(crate) fn array_to_string(vec: &[Value]) -> String {
     vec.iter()
         .map(|item| match item {
-            Value::String(string) => string.clone(),
+            Value::String(s) => s.clone(),
             Value::Array(values) => array_to_string(values),
             Value::Object(_) => "[object Object]".to_string(),
             _ => item.to_string(),
@@ -315,10 +294,116 @@ pub fn array_to_string(vec: &Vec<Value>) -> String {
         .join(",")
 }
 
-
-
-#[cfg(test)]
-mod node_cross_test;
+/// Shared engine for `<`, `<=`, `>`, `>=`.
+///
+/// Recursively coerces operands toward a common primitive type, then calls the
+/// appropriate comparator closure. The recursion terminates when both sides
+/// are the same primitive (`bool`/`bool`, `string`/`string`, `number`/`number`).
+fn coerce_and_compare<B, S, N>(
+    lhs: &Value,
+    rhs: &Value,
+    bool_compare: B,
+    string_compare: S,
+    num_compare: N,
+) -> bool
+where
+    B: Fn(&bool, &bool) -> bool,
+    S: Fn(&str, &str) -> bool,
+    N: Fn(&f64, &f64) -> bool,
+{
+    match (lhs, rhs) {
+        // `null` coerces to `0` under relational operators.
+        (Value::Null, _) => {
+            coerce_and_compare(&json!(0), rhs, bool_compare, string_compare, num_compare)
+        }
+        (_, Value::Null) => {
+            coerce_and_compare(lhs, &json!(0), bool_compare, string_compare, num_compare)
+        }
+        (Value::Bool(l), Value::Bool(r)) => bool_compare(l, r),
+        (Value::String(l), Value::String(r)) => string_compare(l, r),
+        (Value::Number(l), Value::Number(r)) => match (l.as_f64(), r.as_f64()) {
+            (Some(l), Some(r)) => num_compare(&l, &r),
+            _ => false,
+        },
+        (Value::Number(_), Value::String(s)) | (Value::String(s), Value::Number(_)) => {
+            let s_parsed: Value = if s.is_empty() {
+                json!(0)
+            } else {
+                match s.parse::<f64>() {
+                    Ok(parsed) => json!(parsed),
+                    // NaN compared with anything is false in JS.
+                    _ => return false,
+                }
+            };
+            if matches!((lhs, rhs), (Value::Number(_), Value::String(_))) {
+                coerce_and_compare(lhs, &s_parsed, bool_compare, string_compare, num_compare)
+            } else {
+                coerce_and_compare(&s_parsed, rhs, bool_compare, string_compare, num_compare)
+            }
+        }
+        (_, Value::Bool(b)) => {
+            let coerced = if *b { json!(1) } else { json!(0) };
+            coerce_and_compare(lhs, &coerced, bool_compare, string_compare, num_compare)
+        }
+        (Value::Bool(b), _) => {
+            let coerced = if *b { json!(1) } else { json!(0) };
+            coerce_and_compare(&coerced, rhs, bool_compare, string_compare, num_compare)
+        }
+        (Value::Object(_), _) | (_, Value::Object(_)) => {
+            let placeholder = json!("[object Object]");
+            if matches!(lhs, Value::Object(_)) {
+                coerce_and_compare(
+                    &placeholder,
+                    rhs,
+                    bool_compare,
+                    string_compare,
+                    num_compare,
+                )
+            } else {
+                coerce_and_compare(
+                    lhs,
+                    &placeholder,
+                    bool_compare,
+                    string_compare,
+                    num_compare,
+                )
+            }
+        }
+        (Value::Array(values), other) | (other, Value::Array(values)) => {
+            let array_coerced = if values.len() == 1
+                && !matches!(other, Value::String(_) | Value::Array(_))
+            {
+                values[0].clone()
+            } else if values.is_empty() && !matches!(other, Value::String(_) | Value::Array(_)) {
+                json!(false)
+            } else {
+                match other {
+                    Value::Bool(_) | Value::Number(_) | Value::String(_) | Value::Array(_) => {
+                        json!(array_to_string(values))
+                    }
+                    Value::Object(_) | Value::Null => unreachable!(),
+                }
+            };
+            if matches!(lhs, Value::Array(_)) {
+                coerce_and_compare(
+                    &array_coerced,
+                    other,
+                    bool_compare,
+                    string_compare,
+                    num_compare,
+                )
+            } else {
+                coerce_and_compare(
+                    other,
+                    &array_coerced,
+                    bool_compare,
+                    string_compare,
+                    num_compare,
+                )
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

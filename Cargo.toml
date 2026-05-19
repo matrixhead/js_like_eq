@@ -2,6 +2,7 @@
 name = "js_like_eq"
 version = "0.1.0"
 edition = "2024"
+authors = ["mtrxhead <mtrxhead@protonmail.com>"]
 rust-version = "1.85"
 description = "JavaScript-style loose equality, strict equality, relational comparison, and truthiness for serde_json::Value."
 license = "MIT OR Apache-2.0"
